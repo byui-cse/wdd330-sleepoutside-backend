@@ -1,19 +1,14 @@
-const fs = require("fs");
 const clone = require("clone");
 const data = require("./db.json");
-// import jsonServer from "json-server";
 const jsonServer = require("json-server");
-
-// import  jwt from "jsonwebtoken";
 const jwt = require("jsonwebtoken");
 
 const isProductionEnv = process.env.NODE_ENV === "production";
 
-// import fetch from "node-fetch";
-// import bodyParser from "json-server/lib/server/body-parser";
-const bodyParser = require("body-parser");
 const server = jsonServer.create();
-// const router = jsonServer.router("database.json");
+const PORT = Number(process.env.PORT) || 3000;
+const SECRET_KEY = process.env.JWT_SECRET || "123456789";
+const TOKEN_EXPIRATION = process.env.JWT_EXPIRES_IN || "1m";
 
 // For mocking the POST request, POST request won't make any changes to the DB in production environment
 const router = jsonServer.router(
@@ -23,9 +18,9 @@ const router = jsonServer.router(
   }
 );
 
-server.use(bodyParser.urlencoded({ extended: true }));
-server.use(bodyParser.json());
+server.use(jsonServer.bodyParser);
 server.use(jsonServer.defaults());
+
 if (isProductionEnv) {
   server.use((req, res, next) => {
     if (req.path !== "/") router.db.setState(clone(data));
@@ -33,52 +28,27 @@ if (isProductionEnv) {
   });
 }
 
-const SECRET_KEY = "123456789";
-
-// token timeout is set here
-const expiresIn = "1m";
-
 // Create a token from a payload
 function createToken(payload) {
-  return jwt.sign(payload, SECRET_KEY, { expiresIn });
+  return jwt.sign(payload, SECRET_KEY, { expiresIn: TOKEN_EXPIRATION });
 }
 
 // Verify the token
 function verifyToken(token) {
-  return jwt.verify(token, SECRET_KEY, (err, decode) => {
-    if (err) {
-      throw Error(err);
-    } else {
-      return decode;
-    }
-  });
+  return jwt.verify(token, SECRET_KEY);
 }
 
 // Check if the user exists in database
 function isAuthenticated({ email, password }) {
-  return (
-    //userdb.users.findIndex(user => user.username === username && user.password === password) !== -1
-    router.db
-      .get("users")
-      .findIndex((user) => user.email === email && user.password === password)
-      .value() !== -1
-  );
-}
-
-// convert fetch response to json if it is OK
-function convertToJson(res) {
-  if (res.ok) {
-    return res.json();
-  } else {
-    console.log(res.statusText);
-    throw new Error(res.statusText);
-  }
+  return router.db
+    .get("users")
+    .some((user) => user.email === email && user.password === password)
+    .value();
 }
 
 server.post("/login", (req, res) => {
   const { email, password } = req.body;
-  console.log(email, password);
-  if (isAuthenticated({ email, password }) === false) {
+  if (!isAuthenticated({ email, password })) {
     const status = 401;
     const message = "Incorrect username or password";
     res.status(status).json({ status, message });
@@ -90,7 +60,6 @@ server.post("/login", (req, res) => {
 
 server.post("/users", (req, res) => {
   const { email, password } = req.body;
-  console.log(email, password);
   if (email && password) {
     res.status(200).json({ message: `User created: ${email}` });
   } else {
@@ -100,29 +69,13 @@ server.post("/users", (req, res) => {
   }
 });
 
-const apiKey = "/?api_key=6ff8b372bdd0ca37da830f278129a7bf";
-const baseUrl = "http://api.sierratradingpost.com/api/1.0/";
-
-// server.post('/proxy',(req,res) => {
-
-//   const { url } = req.body;
-//   console.log(url);
-//   fetch(url+apiKey).then(convertToJson).then((data) => {
-//     res.status(200).json(data);
-//   })
-
-// });
-
-server.get("/product/:id", async (req, res) => {
+server.get("/product/:id", (req, res) => {
   const id = req.params.id;
-  // fetch(baseUrl+'product/'+id+apiKey)
-  // .then(convertToJson)
-  // .then((data) => {
-  //   res.status(200).json(data);
-  // }).catch((err) => res.status(401).json(err));
-  const products = await router.db.get("products");
-  const product = await products.find((product) => product.Id == id);
-  console.log(products);
+  const product = router.db
+    .get("products")
+    .find((item) => item.Id === id)
+    .value();
+
   if (product) {
     res.status(200).json({ Result: product });
   } else {
@@ -131,19 +84,12 @@ server.get("/product/:id", async (req, res) => {
 });
 server.get("/products/search/:query", (req, res) => {
   const query = req.params.query;
-  // console.log(baseUrl+'products/search~'+query+apiKey);
-  // fetch(baseUrl+'products/search~'+query+apiKey)
-  // .then(convertToJson)
-  // .then((data) => {
-  //   res.status(200).json(data);
-  // })
-  // .catch((err) => res.status(400).json(err));
-  const products = router.db.get("products");
-  const filtered = products.filter((product) => product.Category == query);
-  // const lastOrder = Math.max(...products.map(o=>o.id));
-  // order.id = lastOrder+1;
-  // products.push(order).write();
-  if (filtered) {
+  const filtered = router.db
+    .get("products")
+    .filter((product) => product.Category === query)
+    .value();
+
+  if (filtered.length > 0) {
     res.status(200).json({ Result: filtered });
   } else {
     res.status(200).json({ Result: "No products found" });
@@ -186,13 +132,12 @@ server.post("/checkout", (req, res) => {
     errorMsg.expiration = "Missing card expiration";
   } else {
     const parts = order.expiration.split("/");
-    console.log(parts);
-    if (parts[0] > 0 && parts[0] <= 12 && parts[1]) {
-      const expireDate = new Date(
-        parseInt("20" + parts[1]),
-        parseInt(parts[0]) - 1,
-        1
-      );
+    const month = Number(parts[0]);
+    const year = Number(parts[1]);
+
+    if (parts.length === 2 && month >= 1 && month <= 12 && Number.isInteger(year)) {
+      // Card is valid through the end of the expiration month.
+      const expireDate = new Date(2000 + year, month, 0, 23, 59, 59, 999);
       const curDate = new Date();
 
       if (expireDate < curDate) {
@@ -207,10 +152,14 @@ server.post("/checkout", (req, res) => {
   if (error) {
     res.status(400).json(errorMsg);
   } else {
-    const orders = router.db.get("orders");
-    const lastOrder = Math.max(...orders.map((o) => o.id));
+    const orders = router.db.get("orders").value() || [];
+    const lastOrder = orders.reduce(
+      (maxOrderId, currentOrder) => Math.max(maxOrderId, Number(currentOrder.id) || 0),
+      0
+    );
+
     order.id = lastOrder + 1;
-    orders.push(order).write();
+    router.db.get("orders").push(order).write();
     res.status(200).json({ orderId: order.id, message: "Order Placed" });
   }
 });
@@ -220,16 +169,24 @@ server.use((req, res, next) => {
     const { authorization } = req.headers;
     if (authorization) {
       const [scheme, token] = authorization.split(" ");
-      //jwt.verify(token, 'json-server-auth-123456');
-      // Add claims to request
-      req.claims = verifyToken(token);
-      req.body.userId = req.claims.email;
+      if (scheme === "Bearer" && token) {
+        try {
+          req.claims = verifyToken(token);
+          req.body.userId = req.claims.email;
+        } catch (err) {
+          const status = 401;
+          return res.status(status).json({ status, message: err.message });
+        }
+      }
     }
+
     req.body.createdAt = Date.now();
   }
+
   // Continue to JSON Server router
   next();
 });
+
 server.use(/^(?!\/auth).*$/, (req, res, next) => {
   if (
     req.headers.authorization === undefined ||
@@ -240,10 +197,9 @@ server.use(/^(?!\/auth).*$/, (req, res, next) => {
     res.status(status).json({ status, message });
     return;
   }
-  try {
-    console.log("checking token");
-    verifyToken(req.headers.authorization.split(" ")[1]);
 
+  try {
+    verifyToken(req.headers.authorization.split(" ")[1]);
     next();
   } catch (err) {
     const status = 401;
@@ -254,8 +210,8 @@ server.use(/^(?!\/auth).*$/, (req, res, next) => {
 
 server.use(router);
 
-server.listen(3000, () => {
-  console.log("Run Auth API Server on port 3000");
+server.listen(PORT, () => {
+  console.log(`Run Auth API Server on port ${PORT}`);
 });
 
 module.exports = server;
